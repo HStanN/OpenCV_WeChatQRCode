@@ -2,17 +2,14 @@ package com.demo.wxqrcode
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.os.Handler
 import android.os.Looper
-import android.provider.ContactsContract.CommonDataKinds.Im
 import android.util.AttributeSet
 import android.util.Log
 import android.view.View
 import android.widget.FrameLayout
 import android.widget.ImageView
-import androidx.appcompat.content.res.AppCompatResources
 import androidx.core.view.children
 import org.opencv.android.*
 import org.opencv.android.CameraBridgeViewBase.CAMERA_ID_BACK
@@ -21,6 +18,7 @@ import org.opencv.core.Mat
 import org.opencv.core.Point
 import org.opencv.core.Scalar
 import org.opencv.imgproc.Imgproc
+import kotlin.math.min
 
 class QRCodeDetectorLayout : FrameLayout, CvCameraViewListener2 {
 
@@ -29,14 +27,18 @@ class QRCodeDetectorLayout : FrameLayout, CvCameraViewListener2 {
     private val resultImageView: ImageView
 
     private var dstRgb: Mat? = null
-    private var dstGray: Mat? = null
-    private val center: Point = Point()
-    private var m: Mat? = null
 
     private var previewWidth = 0
     private var previewHeight = 0
+    private var hScale = 1.0f
+    private var vScale = 1.0f
+    private var isRatioSmall = false
 
+    //如果检测到二维码就主动停止继续采集
     private var isDetected = false
+
+    //设置检测间隔，可以提升帧率
+    private var lastDetectTime = 0L
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -55,6 +57,8 @@ class QRCodeDetectorLayout : FrameLayout, CvCameraViewListener2 {
     companion object {
         const val TAG = "QRCodeDetectorLayout"
         private const val ARROW_SIZE = 100
+        //检测间隔时长：1s
+        private const val DETECT_INTERVAL = 1000
     }
 
     constructor(context: Context) : super(context)
@@ -70,6 +74,9 @@ class QRCodeDetectorLayout : FrameLayout, CvCameraViewListener2 {
     init {
         addView(camera2View)
         camera2View.setCvCameraViewListener(this)
+        camera2View.enableFpsMeter()
+        //设置最大采集尺寸
+        camera2View.setMaxFrameSize(720, -1)
         resultImageView = ImageView(context)
         resultImageView.scaleType = ImageView.ScaleType.CENTER_CROP
         resultImageView.visibility = INVISIBLE
@@ -80,13 +87,17 @@ class QRCodeDetectorLayout : FrameLayout, CvCameraViewListener2 {
         super.onDraw(canvas)
     }
 
-    private var startTime = 0L
-
     override fun onCameraViewStarted(width: Int, height: Int) {
-        Log.d(TAG, "onCameraViewStarted: $width * $height")
-        previewWidth = width
-        previewHeight = height
-        startTime = System.currentTimeMillis()
+        previewWidth = height
+        previewHeight = width
+        vScale = previewHeight * 1.00f / camera2View.measuredHeight
+        hScale = previewWidth * 1.00f / camera2View.measuredWidth
+        isRatioSmall =
+            (previewHeight * 1.00f / previewWidth) < (camera2View.measuredHeight * 1.00f / camera2View.measuredWidth)
+        Log.d(
+            TAG,
+            "onCameraViewStarted: $width * $height   scale = $vScale , $hScale  isSmall = $isRatioSmall"
+        )
     }
 
     override fun onCameraViewStopped() {
@@ -94,34 +105,25 @@ class QRCodeDetectorLayout : FrameLayout, CvCameraViewListener2 {
     }
 
     override fun onCameraFrame(inputFrame: CameraBridgeViewBase.CvCameraViewFrame?): Mat? {
-        dstRgb?.release()
-//        dstGray?.release()
-        val rgba = inputFrame?.rgba()
-//        val gray = inputFrame?.gray()
-        rgba?.let {
-            center.x = (rgba.cols() shr 1).toDouble()
-            center.y = (rgba.rows() shr 1).toDouble()
-            if (null == dstRgb) {
-                m = Imgproc.getRotationMatrix2D(center, 270.0, 1.0)
-                dstRgb = Mat(rgba.cols(), rgba.rows(), rgba.type())
-//                dstGray = Mat(gray!!.cols(), gray.rows(), gray.type())
-            }
-            Imgproc.warpAffine(rgba, dstRgb, m, rgba.size())
+        dstRgb = inputFrame?.rgba()
+        inputFrame?.let {
             dstRgb?.let {
-                detectMat(it)
+                detectMat(it, inputFrame.gray())
             }
         }
         return dstRgb
     }
 
-    private fun detectMat(source: Mat) {
+    private fun detectMat(source: Mat, gray: Mat) {
         if (isDetected) return
-        val currentTime = System.currentTimeMillis()
-        if (currentTime - startTime < 2000){
+        val timeInterval = System.currentTimeMillis() - lastDetectTime
+        if (timeInterval < DETECT_INTERVAL){
+            //设置一个检测间隔时间，可以提升画面帧数
             return
         }
+        lastDetectTime = System.currentTimeMillis()
         val points = mutableListOf<Mat>()
-        val res = WeChatQRCodeDetector.detectAndDecode(source, points)
+        val res = WeChatQRCodeDetector.detectAndDecode(gray, points)
         val results = mutableListOf<QRCodeResult>()
         if (res != null && res.size > 0) {
             isDetected = true
@@ -135,18 +137,21 @@ class QRCodeDetectorLayout : FrameLayout, CvCameraViewListener2 {
                     Point(pointArr[4].toDouble(), pointArr[5].toDouble())
                 val point4 =
                     Point(pointArr[6].toDouble(), pointArr[7].toDouble())
-                val qrCodeResult = QRCodeResult(content, point1, point2, point3,point4)
+                val qrCodeResult = QRCodeResult(content, point1, point2, point3, point4)
                 results.add(qrCodeResult)
             }
             val isMultiQRCode = results.size > 1
             for (qrcodeResult in results) {
+                //画出二维码的4个顶点
                 drawQRCodeCornerPoint(source, qrcodeResult.point1)
                 drawQRCodeCornerPoint(source, qrcodeResult.point2)
                 drawQRCodeCornerPoint(source, qrcodeResult.point3)
                 drawQRCodeCornerPoint(source, qrcodeResult.point4)
-                drawQRCodeArrow(source,qrcodeResult)
+                //添加二维码中心箭头
+                drawQRCodeArrow(qrcodeResult)
             }
             if (!isMultiQRCode) {
+                //只有一个二维码时直接返回结果
                 forwardListener?.forward(results[0].content)
             }
             val tmp = source.clone()
@@ -170,20 +175,9 @@ class QRCodeDetectorLayout : FrameLayout, CvCameraViewListener2 {
         }
     }
 
-    private fun drawQRCodeArrow(source: Mat,qrCodeResult: QRCodeResult) {
+    private fun drawQRCodeArrow(qrCodeResult: QRCodeResult) {
         val centerX = (qrCodeResult.point2.x + qrCodeResult.point4.x) / 2
         val centerY = (qrCodeResult.point2.y + qrCodeResult.point4.y) / 2
-        val centerPoint = Point(centerX,centerY)
-        centerPoint?.let {
-            Imgproc.circle(
-                source,
-                centerPoint,
-                10,
-                Scalar(0.0, 0.0, 0.0, 0.0),
-                Imgproc.FILLED,
-                Imgproc.LINE_AA
-            )
-        }
         runOnUIThread {
             addArrowImage(centerX, centerY, qrCodeResult.content)
         }
@@ -196,21 +190,35 @@ class QRCodeDetectorLayout : FrameLayout, CvCameraViewListener2 {
         params.width = ARROW_SIZE
         params.height = ARROW_SIZE
         val halfSize = ARROW_SIZE / 2
-        params.leftMargin = (x - halfSize).toInt()
-        val extraMargin = (measuredHeight - previewHeight) / 2.0
-        params.topMargin = (extraMargin + y - halfSize).toInt()
+        val point = calculateRealPosition(x, y)
+        params.leftMargin = (point.x - halfSize).toInt()
+        params.topMargin = (point.y - halfSize).toInt()
         arrow.setImageResource(R.drawable.ic_open_qrcode)
-        arrow.alpha = 0.3f
         arrow.setOnClickListener {
             forwardListener?.forward(content)
         }
         addView(arrow, params)
-        arrow.postDelayed({
-            Log.d("ArrowPosition","extra = $extraMargin")
-            Log.d("ArrowPosition","x = $x , y = $y")
-            Log.d("ArrowPosition","pivotX = ${arrow.pivotX} , pivotY = ${arrow.pivotY}")
-            Log.d("ArrowPosition","vX = ${arrow.x} , vY = ${arrow.y}")
-        },1000)
+    }
+
+    //根据放大的实际图像和预览布局的比例，计算二维码中心点在布局中的实际坐标点
+    private fun calculateRealPosition(x: Double, y: Double): Point {
+        val point = Point()
+        if (isRatioSmall) {
+            val scale = min(vScale, hScale)
+            val realX = x / scale
+            val realY = y / scale
+            val diffX = ((previewWidth * 1.00f / scale) - camera2View.measuredWidth) / 2
+            point.x = realX - diffX
+            point.y = realY
+        } else {
+            val scale = min(vScale, hScale)
+            val realX = x / scale
+            val realY = y / scale
+            val diffY = ((previewHeight * 1.00f / scale) - camera2View.measuredHeight) / 2
+            point.x = realX
+            point.y = realY - diffY
+        }
+        return point
     }
 
     private fun showResult(source: Mat) {
@@ -239,7 +247,7 @@ class QRCodeDetectorLayout : FrameLayout, CvCameraViewListener2 {
                 arrowList.add(child)
             }
         }
-        for (view in arrowList){
+        for (view in arrowList) {
             removeView(view)
         }
         resultImageView.setImageBitmap(null)
