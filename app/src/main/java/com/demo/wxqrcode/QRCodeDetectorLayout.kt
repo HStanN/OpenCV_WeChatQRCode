@@ -1,5 +1,7 @@
 package com.demo.wxqrcode
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -8,8 +10,11 @@ import android.os.Looper
 import android.util.AttributeSet
 import android.util.Log
 import android.view.View
+import android.view.ViewPropertyAnimator
+import android.view.animation.AccelerateDecelerateInterpolator
 import android.widget.FrameLayout
 import android.widget.ImageView
+import android.widget.Toast
 import androidx.core.view.children
 import org.opencv.android.*
 import org.opencv.android.CameraBridgeViewBase.CAMERA_ID_BACK
@@ -41,6 +46,8 @@ class QRCodeDetectorLayout : FrameLayout, CvCameraViewListener2 {
     private var lastDetectTime = 0L
 
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    private var translateAnimation: ViewPropertyAnimator? = null
 
     var forwardListener: QRCodeDetectResultListener? = null
 
@@ -123,6 +130,7 @@ class QRCodeDetectorLayout : FrameLayout, CvCameraViewListener2 {
         }
         lastDetectTime = System.currentTimeMillis()
         val points = mutableListOf<Mat>()
+        //检测灰度图可以提升性能表现
         val res = WeChatQRCodeDetector.detectAndDecode(gray, points)
         val results = mutableListOf<QRCodeResult>()
         if (res != null && res.size > 0) {
@@ -148,11 +156,7 @@ class QRCodeDetectorLayout : FrameLayout, CvCameraViewListener2 {
                 drawQRCodeCornerPoint(source, qrcodeResult.point3)
                 drawQRCodeCornerPoint(source, qrcodeResult.point4)
                 //添加二维码中心箭头
-                drawQRCodeArrow(qrcodeResult)
-            }
-            if (!isMultiQRCode) {
-                //只有一个二维码时直接返回结果
-                forwardListener?.forward(results[0].content)
+                drawQRCodeArrow(qrcodeResult,isMultiQRCode)
             }
             val tmp = source.clone()
             runOnUIThread {
@@ -175,15 +179,15 @@ class QRCodeDetectorLayout : FrameLayout, CvCameraViewListener2 {
         }
     }
 
-    private fun drawQRCodeArrow(qrCodeResult: QRCodeResult) {
+    private fun drawQRCodeArrow(qrCodeResult: QRCodeResult, isMultiQRCode: Boolean) {
         val centerX = (qrCodeResult.point2.x + qrCodeResult.point4.x) / 2
         val centerY = (qrCodeResult.point2.y + qrCodeResult.point4.y) / 2
         runOnUIThread {
-            addArrowImage(centerX, centerY, qrCodeResult.content)
+            addArrowImage(centerX, centerY, qrCodeResult.content,isMultiQRCode)
         }
     }
 
-    private fun addArrowImage(x: Double, y: Double, content: String) {
+    private fun addArrowImage(x: Double, y: Double, content: String,isMultiQRCode: Boolean) {
         val arrow = ImageView(context)
         arrow.tag = "arrow_$content"
         val params = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT)
@@ -193,11 +197,41 @@ class QRCodeDetectorLayout : FrameLayout, CvCameraViewListener2 {
         val point = calculateRealPosition(x, y)
         params.leftMargin = (point.x - halfSize).toInt()
         params.topMargin = (point.y - halfSize).toInt()
-        arrow.setImageResource(R.drawable.ic_open_qrcode)
-        arrow.setOnClickListener {
-            forwardListener?.forward(content)
+        if (isMultiQRCode){
+            arrow.setImageResource(R.drawable.ic_open_qrcode)
+            arrow.setOnClickListener {
+                forwardListener?.forward(content)
+            }
+        }else{
+            arrow.setImageResource(R.drawable.single_qrcode_bg)
+            arrow.postDelayed({
+                translateResultPoint(arrow,content)
+            },500)
         }
         addView(arrow, params)
+    }
+
+    /**
+     * 单个二维码，解析成功的中心点动画移动到屏幕中央
+     * */
+    private fun translateResultPoint(view: View,content: String){
+        translateAnimation?.let {
+            it.cancel()
+            view.clearAnimation()
+        }
+        val halfSize = ARROW_SIZE / 2
+        val targetY = camera2View.measuredHeight / 2.00 - halfSize - view.y
+        val targetX = camera2View.measuredWidth / 2.00 - halfSize - view.x
+        translateAnimation = view.animate()
+            .translationY(targetY.toFloat())
+            .translationX(targetX.toFloat())
+            .setInterpolator(AccelerateDecelerateInterpolator())
+            .setDuration(450)
+            .setListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    forwardListener?.forward(content)
+                }
+            })
     }
 
     //根据放大的实际图像和预览布局的比例，计算二维码中心点在布局中的实际坐标点
